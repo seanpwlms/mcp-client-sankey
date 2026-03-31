@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MCP Clients — Feature Sankey</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://unpkg.com/d3-sankey@0.12.3/dist/d3-sankey.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d1117;
+    color: #c9d1d9;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    overflow-x: hidden;
+  }
+  h1 {
+    text-align: center;
+    padding: 24px 0 4px;
+    font-size: 22px;
+    font-weight: 600;
+    color: #e6edf3;
+    letter-spacing: -0.3px;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 13px;
+    color: #7d8590;
+    margin-bottom: 16px;
+  }
+  #controls {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    padding: 0 24px 12px;
+    max-width: 960px;
+    margin: 0 auto;
+  }
+  .feature-btn {
+    position: relative;
+    border: 2px solid;
+    border-radius: 20px;
+    padding: 6px 16px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    background: transparent;
+    user-select: none;
+  }
+  .feature-btn:hover { transform: scale(1.05); }
+  .feature-btn.active { color: #0d1117 !important; }
+  .feature-btn .badge {
+    position: absolute;
+    top: -7px;
+    right: -7px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #e6edf3;
+    color: #0d1117;
+    font-size: 10px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+  }
+  #order-display {
+    text-align: center;
+    font-size: 13px;
+    color: #7d8590;
+    padding: 0 24px 16px;
+    min-height: 24px;
+  }
+  #order-display .step {
+    display: inline-block;
+    margin: 0 2px;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-weight: 600;
+    font-size: 12px;
+  }
+  #order-display .arrow { color: #484f58; margin: 0 2px; }
+  #chart { width: 100%; display: flex; justify-content: center; }
+  .link { fill: none; transition: stroke-opacity 0.2s; }
+  .link:hover { stroke-opacity: 0.55; }
+  .tooltip {
+    position: absolute;
+    background: #1c2128;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 12px;
+    color: #c9d1d9;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+    max-width: 320px;
+    z-index: 10;
+  }
+  .tooltip .tt-name { font-weight: 600; color: #e6edf3; font-size: 14px; margin-bottom: 4px; }
+  .tooltip .tt-feat {
+    display: inline-block;
+    border-radius: 10px;
+    padding: 2px 8px;
+    margin: 2px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .tooltip .tt-clients {
+    max-height: 200px;
+    overflow-y: auto;
+    margin-top: 6px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: #8b949e;
+  }
+  #reset-btn {
+    background: transparent;
+    border: 1px solid #30363d;
+    color: #7d8590;
+    border-radius: 14px;
+    padding: 4px 14px;
+    font-size: 12px;
+    cursor: pointer;
+    margin-left: 8px;
+    transition: all 0.2s;
+  }
+  #reset-btn:hover { border-color: #8b949e; color: #c9d1d9; }
+</style>
+</head>
+<body>
+<h1>MCP Client Feature Support</h1>
+<p class="subtitle">Click features to build a filter funnel. Each step narrows the client pool and shows how many are excluded.</p>
+<div id="controls"></div>
+<div id="order-display"></div>
+<div id="chart"></div>
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+// ── Feature colors ──
+const FEATURE_COLORS = {
+  'Resources':    '#5B8DEF',
+  'Prompts':      '#7B6CD9',
+  'Tools':        '#3FB950',
+  'Discovery':    '#D4A017',
+  'Instructions': '#C9A83E',
+  'Sampling':     '#E5534B',
+  'Roots':        '#57AB5A',
+  'Elicitation':  '#A371F7',
+  'CIMD':         '#D4A017',
+  'DCR':          '#D97706',
+  'Tasks':        '#B87333',
+  'Apps':         '#DA3633',
+};
+
+const SOURCE_URL = 'https://raw.githubusercontent.com/modelcontextprotocol/modelcontextprotocol/refs/heads/main/docs/clients.mdx';
+
+// ── Mutable state populated by fetch ──
+let FEATURES = [];
+let CLIENTS = [];
+let featureColorMap = {};
+let selectedOrder = [];
+
+// ── Parse MDX <McpClient> components from GitHub ──
+function parseMdx(text) {
+  // Extract the FEATURES array defined in the MDX export
+  const featMatch = text.match(/export\s+const\s+FEATURES\s*=\s*\[([^\]]+)\]/);
+  let featureNames;
+  if (featMatch) {
+    featureNames = featMatch[1].match(/"([^"]+)"/g).map(s => s.replace(/"/g, ''));
+  } else {
+    featureNames = Object.keys(FEATURE_COLORS);
+  }
+
+  const features = featureNames.map(name => ({
+    id: name,
+    color: FEATURE_COLORS[name] || '#8b949e'
+  }));
+
+  // Extract all <McpClient name="..." supports="..."> entries
+  const clientRegex = /<McpClient\s[^>]*?name\s*=\s*"([^"]+)"[^>]*?>/g;
+  const supportsRegex = /supports\s*=\s*"([^"]*)"/;
+  const clients = [];
+  let match;
+
+  while ((match = clientRegex.exec(text)) !== null) {
+    const name = match[1];
+    const tag = match[0];
+    const supMatch = tag.match(supportsRegex);
+    const supported = supMatch
+      ? supMatch[1].split(',').map(s => s.trim().replace(/\s*\(partial\)/, '')).filter(Boolean)
+      : [];
+    clients.push({ name, f: supported });
+  }
+
+  if (clients.length === 0) throw new Error('No <McpClient> entries found');
+  return { features, clients };
+}
+
+// ── Init: fetch then boot UI ──
+async function init() {
+  const chart = document.getElementById('chart');
+  chart.innerHTML = '<svg width="400" height="100"><text x="200" y="50" text-anchor="middle" fill="#7d8590" font-size="14">Loading client data from GitHub...</text></svg>';
+
+  try {
+    const res = await fetch(SOURCE_URL);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    const parsed = parseMdx(text);
+    FEATURES = parsed.features;
+    CLIENTS = parsed.clients;
+  } catch (err) {
+    chart.innerHTML = `<svg width="600" height="100"><text x="300" y="50" text-anchor="middle" fill="#E5534B" font-size="14">Failed to load data: ${err.message}</text></svg>`;
+    console.error('Fetch/parse error:', err);
+    return;
+  }
+
+  featureColorMap = {};
+  FEATURES.forEach(f => featureColorMap[f.id] = f.color);
+
+  buildControls();
+  render();
+}
+
+// ── Controls ──
+function buildControls() {
+  const controls = d3.select('#controls').html('');
+  FEATURES.forEach(f => {
+    controls.append('button')
+      .attr('class', 'feature-btn')
+      .attr('data-feature', f.id)
+      .style('border-color', f.color)
+      .style('color', f.color)
+      .html(f.id)
+      .on('click', () => {
+        const idx = selectedOrder.indexOf(f.id);
+        if (idx >= 0) selectedOrder.splice(idx, 1);
+        else selectedOrder.push(f.id);
+        updateButtons();
+        render();
+      });
+  });
+}
+
+function updateButtons() {
+  d3.select('#controls').selectAll('.feature-btn').each(function() {
+    const btn = d3.select(this);
+    const fId = btn.attr('data-feature');
+    const color = featureColorMap[fId];
+    const idx = selectedOrder.indexOf(fId);
+    if (idx >= 0) {
+      btn.classed('active', true)
+        .style('background', color)
+        .style('color', '#0d1117')
+        .html(`${fId}<span class="badge">${idx + 1}</span>`);
+    } else {
+      btn.classed('active', false)
+        .style('background', 'transparent')
+        .style('color', color)
+        .html(fId);
+    }
+  });
+}
+
+// ── Tooltip ──
+const tooltip = d3.select('#tooltip');
+function showTooltip(evt, html) {
+  tooltip.html(html).style('opacity', 1);
+  positionTooltip(evt);
+}
+function positionTooltip(evt) {
+  const tt = tooltip.node();
+  let x = evt.pageX + 14, y = evt.pageY - 12;
+  if (x + tt.offsetWidth > window.innerWidth - 20) x = evt.pageX - tt.offsetWidth - 14;
+  if (y + tt.offsetHeight > window.innerHeight + window.scrollY - 20) y = evt.pageY - tt.offsetHeight - 12;
+  tooltip.style('left', x + 'px').style('top', y + 'px');
+}
+function hideTooltip() { tooltip.style('opacity', 0); }
+
+// ── Compute funnel at each step ──
+function computeFunnel(order) {
+  const steps = [];
+  let pool = [...CLIENTS];
+  steps.push({ feature: null, label: 'All Clients', survivors: pool, excluded: [], cumulative: pool.length });
+
+  for (const feat of order) {
+    const pass = pool.filter(c => c.f.includes(feat));
+    const fail = pool.filter(c => !c.f.includes(feat));
+    steps.push({ feature: feat, label: feat, survivors: pass, excluded: fail, cumulative: pass.length });
+    pool = pass;
+  }
+  return steps;
+}
+
+// ── Render ──
+function render() {
+  const container = document.getElementById('chart');
+  container.innerHTML = '';
+
+  // Update order display
+  const orderDiv = d3.select('#order-display');
+  if (selectedOrder.length === 0) {
+    orderDiv.html('<span style="color:#484f58">Click features above to start filtering</span>');
+  } else {
+    let html = '<span style="color:#8b949e">Filter chain:</span> ';
+    html += `<span class="step" style="background:#21262d;color:#8b949e">All (${CLIENTS.length})</span>`;
+    const funnel = computeFunnel(selectedOrder);
+    for (let i = 1; i < funnel.length; i++) {
+      const s = funnel[i];
+      const color = featureColorMap[s.feature];
+      html += `<span class="arrow">&rarr;</span>`;
+      html += `<span class="step" style="background:${color}22;color:${color};border:1px solid ${color}55">${s.label} (${s.cumulative})</span>`;
+    }
+    html += `<button id="reset-btn" onclick="selectedOrder=[];updateButtons();render();">Clear</button>`;
+    orderDiv.html(html);
+  }
+
+  if (selectedOrder.length === 0) {
+    renderEmpty();
+    return;
+  }
+
+  const funnel = computeFunnel(selectedOrder);
+
+  // Build sankey graph
+  const nodes = [];
+  const links = [];
+  let nodeIdx = 0;
+
+  // Create nodes for each step
+  // Step 0: "All Clients"
+  const nodeIds = {};
+
+  // For each step, create a "pass" node. For steps 1+, also create an "excluded" node.
+  for (let i = 0; i < funnel.length; i++) {
+    const s = funnel[i];
+    const isFirst = i === 0;
+    const color = isFirst ? '#8b949e' : featureColorMap[s.feature];
+
+    // Pass / survivor node
+    nodeIds[`pass_${i}`] = nodeIdx;
+    nodes.push({
+      name: isFirst ? `All Clients` : `${s.label}`,
+      count: s.survivors.length,
+      type: 'pass',
+      stepIndex: i,
+      color: color,
+      clients: s.survivors,
+      feature: s.feature,
+    });
+    nodeIdx++;
+
+    // Excluded node (not for step 0)
+    if (!isFirst && s.excluded.length > 0) {
+      nodeIds[`excl_${i}`] = nodeIdx;
+      nodes.push({
+        name: `No ${s.label}`,
+        count: s.excluded.length,
+        type: 'excluded',
+        stepIndex: i,
+        color: color,
+        clients: s.excluded,
+        feature: s.feature,
+      });
+      nodeIdx++;
+    }
+  }
+
+  // Create individual client nodes for final survivors
+  const finalSurvivors = funnel[funnel.length - 1].survivors;
+  const lastPassIdx = funnel.length - 1;
+  const clientNodeStart = nodeIdx;
+
+  // Sort final survivors alphabetically
+  const sortedSurvivors = [...finalSurvivors].sort((a, b) => a.name.localeCompare(b.name));
+  sortedSurvivors.forEach(c => {
+    nodeIds[`client_${c.name}`] = nodeIdx;
+    nodes.push({
+      name: c.name,
+      count: 1,
+      type: 'client',
+      stepIndex: funnel.length,
+      color: '#30363d',
+      clients: [c],
+      feature: null,
+    });
+    nodeIdx++;
+  });
+
+  // Create links
+  for (let i = 1; i < funnel.length; i++) {
+    const s = funnel[i];
+    const prevPassId = nodeIds[`pass_${i - 1}`];
+    const currPassId = nodeIds[`pass_${i}`];
+    const currExclId = nodeIds[`excl_${i}`];
+
+    // Link: previous pass → current pass (survivors)
+    if (s.survivors.length > 0) {
+      links.push({
+        source: prevPassId,
+        target: currPassId,
+        value: s.survivors.length,
+        color: featureColorMap[s.feature],
+        type: 'pass',
+        feature: s.feature,
+      });
+    }
+
+    // Link: previous pass → excluded
+    if (s.excluded.length > 0 && currExclId !== undefined) {
+      links.push({
+        source: prevPassId,
+        target: currExclId,
+        value: s.excluded.length,
+        color: featureColorMap[s.feature],
+        type: 'excluded',
+        feature: s.feature,
+      });
+    }
+  }
+
+  // Links from last pass node → individual clients
+  if (sortedSurvivors.length > 0 && sortedSurvivors.length <= 50) {
+    sortedSurvivors.forEach(c => {
+      links.push({
+        source: nodeIds[`pass_${lastPassIdx}`],
+        target: nodeIds[`client_${c.name}`],
+        value: 1,
+        color: '#484f58',
+        type: 'client',
+        feature: null,
+      });
+    });
+  }
+
+  if (links.length === 0) return;
+
+  // Sizing
+  const stepsCount = funnel.length + (sortedSurvivors.length <= 50 && sortedSurvivors.length > 0 ? 1 : 0);
+  const maxNodesInCol = Math.max(
+    2, // pass + excluded
+    sortedSurvivors.length <= 50 ? sortedSurvivors.length : 1
+  );
+  const margin = { top: 20, right: 160, bottom: 20, left: 20 };
+  const width = Math.min(1400, Math.max(700, stepsCount * 220 + 300));
+  const height = Math.max(420, maxNodesInCol * 20 + 80);
+
+  const svg = d3.select('#chart').append('svg')
+    .attr('width', width)
+    .attr('height', height + margin.top + margin.bottom)
+    .append('g')
+    .attr('transform', `translate(${margin.left},${margin.top})`);
+
+  const innerWidth = width - margin.left - margin.right;
+  const innerHeight = height;
+
+  // Use d3-sankey
+  const sankey = d3.sankey()
+    .nodeId((d, i) => i)
+    .nodeWidth(20)
+    .nodePadding(sortedSurvivors.length > 30 ? 2 : sortedSurvivors.length > 15 ? 4 : 8)
+    .nodeAlign(d3.sankeyLeft)
+    .nodeSort(null)
+    .extent([[0, 0], [innerWidth, innerHeight]]);
+
+  const graph = sankey({
+    nodes: nodes.map(d => ({ ...d })),
+    links: links.map(d => ({ ...d }))
+  });
+
+  // Draw links
+  svg.append('g')
+    .selectAll('path')
+    .data(graph.links)
+    .join('path')
+    .attr('class', 'link')
+    .attr('d', d3.sankeyLinkHorizontal())
+    .attr('stroke', d => d.color)
+    .attr('stroke-opacity', d => d.type === 'excluded' ? 0.15 : d.type === 'client' ? 0.25 : 0.35)
+    .attr('stroke-width', d => Math.max(1, d.width))
+    .on('mouseover', function(evt, d) {
+      d3.select(this).attr('stroke-opacity', d.type === 'excluded' ? 0.35 : 0.55);
+      if (d.type === 'excluded') {
+        const clients = d.target.clients || [];
+        showTooltip(evt, `<div class="tt-name">${d.target.count} clients excluded</div><div style="color:#7d8590">Missing <span style="color:${d.color};font-weight:600">${d.feature}</span></div><div class="tt-clients">${clients.map(c => c.name).join(', ')}</div>`);
+      } else if (d.type === 'pass') {
+        showTooltip(evt, `<div class="tt-name">${d.target.count} clients</div><div style="color:#7d8590">Support <span style="color:${d.color};font-weight:600">${d.feature}</span></div>`);
+      }
+    })
+    .on('mousemove', positionTooltip)
+    .on('mouseout', function(evt, d) {
+      d3.select(this).attr('stroke-opacity', d.type === 'excluded' ? 0.15 : d.type === 'client' ? 0.25 : 0.35);
+      hideTooltip();
+    });
+
+  // Draw nodes
+  const node = svg.append('g')
+    .selectAll('g')
+    .data(graph.nodes)
+    .join('g');
+
+  node.append('rect')
+    .attr('x', d => d.x0)
+    .attr('y', d => d.y0)
+    .attr('height', d => Math.max(2, d.y1 - d.y0))
+    .attr('width', d => d.x1 - d.x0)
+    .attr('fill', d => {
+      if (d.type === 'excluded') return '#21262d';
+      if (d.type === 'client') return '#30363d';
+      if (d.stepIndex === 0) return '#30363d';
+      return d.color;
+    })
+    .attr('rx', 3)
+    .attr('stroke', d => {
+      if (d.type === 'excluded') return '#30363d';
+      if (d.type === 'client') return '#484f58';
+      if (d.stepIndex === 0) return '#484f58';
+      return d.color;
+    })
+    .attr('stroke-width', 1)
+    .attr('opacity', d => d.type === 'excluded' ? 0.7 : 1)
+    .style('cursor', d => d.type === 'client' ? 'default' : 'pointer')
+    .on('mouseover', function(evt, d) {
+      if (d.type === 'client') {
+        const client = CLIENTS.find(c => c.name === d.name);
+        const feats = client ? client.f.map(fId =>
+          `<span class="tt-feat" style="background:${featureColorMap[fId]}33;color:${featureColorMap[fId]}">${fId}</span>`
+        ).join(' ') : '';
+        showTooltip(evt, `<div class="tt-name">${d.name}</div><div style="margin-top:6px">${feats}</div>`);
+      } else if (d.type === 'excluded') {
+        const clients = d.clients || [];
+        showTooltip(evt, `<div class="tt-name">${d.count} excluded</div><div style="color:#7d8590">Don't support <span style="color:${d.color};font-weight:600">${d.feature}</span></div><div class="tt-clients">${clients.map(c => c.name).join(', ')}</div>`);
+      } else {
+        const clients = d.clients || [];
+        const label = d.stepIndex === 0 ? 'All clients' : `Support ${d.feature}`;
+        showTooltip(evt, `<div class="tt-name">${d.count} clients</div><div style="color:#7d8590">${label}</div><div class="tt-clients">${clients.map(c => c.name).join(', ')}</div>`);
+      }
+    })
+    .on('mousemove', positionTooltip)
+    .on('mouseout', hideTooltip);
+
+  // Labels
+  node.append('text')
+    .attr('x', d => {
+      if (d.type === 'client') return d.x1 + 6;
+      if (d.type === 'excluded') return d.x1 + 6;
+      return (d.x0 + d.x1) / 2;
+    })
+    .attr('y', d => (d.y0 + d.y1) / 2)
+    .attr('dy', '0.35em')
+    .attr('text-anchor', d => {
+      if (d.type === 'client' || d.type === 'excluded') return 'start';
+      return 'middle';
+    })
+    .each(function(d) {
+      const el = d3.select(this);
+      if (d.type === 'client') {
+        el.text(d.name)
+          .style('font-size', '11px')
+          .style('fill', '#8b949e');
+      } else if (d.type === 'excluded') {
+        el.text(`-${d.count}`)
+          .style('font-size', '12px')
+          .style('font-weight', '700')
+          .style('fill', '#484f58');
+      } else {
+        // Pass node: show count prominently
+        el.text(d.count)
+          .style('font-size', '13px')
+          .style('font-weight', '700')
+          .style('fill', d.stepIndex === 0 ? '#c9d1d9' : '#fff');
+      }
+    });
+
+  // Feature labels above pass nodes (not for step 0)
+  node.filter(d => d.type === 'pass' && d.stepIndex > 0)
+    .append('text')
+    .attr('x', d => (d.x0 + d.x1) / 2)
+    .attr('y', d => d.y0 - 8)
+    .attr('text-anchor', 'middle')
+    .text(d => d.name)
+    .style('font-size', '12px')
+    .style('font-weight', '600')
+    .style('fill', d => d.color);
+
+  // "All Clients" label above first node
+  node.filter(d => d.type === 'pass' && d.stepIndex === 0)
+    .append('text')
+    .attr('x', d => (d.x0 + d.x1) / 2)
+    .attr('y', d => d.y0 - 8)
+    .attr('text-anchor', 'middle')
+    .text('All Clients')
+    .style('font-size', '12px')
+    .style('font-weight', '600')
+    .style('fill', '#8b949e');
+
+  // "Survivors" label above client column
+  if (sortedSurvivors.length > 0 && sortedSurvivors.length <= 50) {
+    const firstClient = graph.nodes.find(n => n.type === 'client');
+    if (firstClient) {
+      svg.append('text')
+        .attr('x', (firstClient.x0 + firstClient.x1) / 2)
+        .attr('y', firstClient.y0 - 8)
+        .attr('text-anchor', 'middle')
+        .text(`${sortedSurvivors.length} Remaining`)
+        .style('font-size', '12px')
+        .style('font-weight', '600')
+        .style('fill', '#3FB950');
+    }
+  }
+
+  // If too many survivors to show individually, add summary text
+  if (sortedSurvivors.length > 50) {
+    const lastPass = graph.nodes.find(n => n.type === 'pass' && n.stepIndex === lastPassIdx);
+    if (lastPass) {
+      svg.append('text')
+        .attr('x', lastPass.x1 + 16)
+        .attr('y', (lastPass.y0 + lastPass.y1) / 2)
+        .attr('dy', '0.35em')
+        .text(`${sortedSurvivors.length} clients remain`)
+        .style('font-size', '13px')
+        .style('fill', '#3FB950')
+        .style('font-weight', '600');
+    }
+  }
+}
+
+function renderEmpty() {
+  const container = document.getElementById('chart');
+  const width = Math.min(1000, window.innerWidth - 32);
+  const height = 400;
+
+  const svg = d3.select('#chart').append('svg')
+    .attr('width', width)
+    .attr('height', height);
+
+  // Show feature popularity as horizontal bars
+  const featureCounts = FEATURES.map(f => ({
+    ...f,
+    count: CLIENTS.filter(c => c.f.includes(f.id)).length
+  })).sort((a, b) => b.count - a.count);
+
+  const margin = { top: 40, right: 40, bottom: 20, left: 110 };
+  const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+  const barW = width - margin.left - margin.right;
+  const barH = 24;
+  const gap = 4;
+
+  g.append('text')
+    .attr('x', barW / 2)
+    .attr('y', -16)
+    .attr('text-anchor', 'middle')
+    .text(`${CLIENTS.length} total clients — click features above to explore`)
+    .style('fill', '#7d8590')
+    .style('font-size', '14px');
+
+  const x = d3.scaleLinear().domain([0, CLIENTS.length]).range([0, barW]);
+
+  featureCounts.forEach((f, i) => {
+    const y = i * (barH + gap);
+    g.append('rect')
+      .attr('x', 0)
+      .attr('y', y)
+      .attr('width', x(f.count))
+      .attr('height', barH)
+      .attr('fill', f.color)
+      .attr('opacity', 0.7)
+      .attr('rx', 4);
+
+    g.append('text')
+      .attr('x', -8)
+      .attr('y', y + barH / 2)
+      .attr('dy', '0.35em')
+      .attr('text-anchor', 'end')
+      .text(f.id)
+      .style('fill', f.color)
+      .style('font-size', '12px')
+      .style('font-weight', '600');
+
+    g.append('text')
+      .attr('x', x(f.count) + 6)
+      .attr('y', y + barH / 2)
+      .attr('dy', '0.35em')
+      .text(f.count)
+      .style('fill', '#8b949e')
+      .style('font-size', '12px')
+      .style('font-weight', '600');
+  });
+}
+
+// Boot
+init();
+window.addEventListener('resize', () => { if (CLIENTS.length) render(); });
+</script>
+</body>
+</html>
